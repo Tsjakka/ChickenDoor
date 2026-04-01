@@ -42,13 +42,13 @@ const int LowerSensorPin = 16;              // Digital output of lower TCRT5000 
 // Regional settings
 const float Latitude = 0.0000000;           // Replace with your coordinates
 const float Longitude = 0.000000;
-int Timezone = 60;                          // UTC difference in minutes (can be changed through web page)
+int8_t Timezone = 60;                       // UTC difference in minutes (can be changed through web page)
 bool UseDST = true;                         // Indicates whether Daylight Saving Time is observed in your region or not.
 
 // Opening and closing times (can be changed through the web page)
 uint8_t CloseBeforeSunriseMinutes = 120;    // The number of minutes before sunrise we close the coop
 uint8_t HourOpen = 7;                       // The time the chickens may leave the coop
-uint8_t MinuteOpen = 20;
+uint8_t MinuteOpen = 15;
 uint8_t WeekendHourOpen = 7;                // The time the chickens may leave the coop in the weekend
 uint8_t WeekendMinuteOpen = 20;
 uint8_t HourCalibration = 1;                // Hour when to calibrate the position of the door
@@ -78,18 +78,19 @@ const int PwmFast = 1023;                   // Fast speed PWM duty cycle
 const int DirDelay = 1000;                  // Delay to prevent abrupt motor changes
 
 // Stuff related to controlling the motor
-long UpMoveMillis = 12900;                  // The default duration of an up move.
+long UpMoveMillis = 13300;                  // The default duration of an up move.
 long DownMoveMillis = 12700;                // The default duration of a down move. When using a lower sensor this is used when the sensor fails
 long CalibrationMoveMillis = 2500;          // The max. duration of the move used for calibrating the position of the door
 
 // At least one of the following booleans must be true
-const bool UseTemperature = false;          // Use the temperature for deciding when to open and close the door (otherwise it's time based)
+const bool UseTemperature = true;           // Use the temperature for deciding when to open and close the door (otherwise it's time based)
 const bool UseClock = true;                 // Use the clock for deciding when to open and close the door (otherwise it's temperature based)
 
-// For reading the temperature.
-bool Bme280Present = true;                  // Initialize/use the BME280 or not
-const float ClosingTemperature = 0;         // Close the door at night when the temperature goes below this value
+// For reading the temperature
 const time_t LoopPeriod = 180;              // Number of seconds between checks
+bool Bme280Present = true;                  // Initialize/use the BME280 or not
+int ClosingTemperature = 20;                // Close the door at night when the temperature goes below this value (in 0.1 °C)
+int TemperatureOffset = 0;                  // Add to measured temperature to get real temperature (in 0.1 °C)
 
 // ************************************************************************
 // Change the constants above to adjust the software to your situation
@@ -270,24 +271,29 @@ void setup() {
   }
 
   // The begin() call is required to initialize the EEPROM library
-  EEPROM.begin(32);
+  EEPROM.begin(142);
 
   // Read from EEPROM
   bool dataPresent = false;
-  EEPROM.get(0, dataPresent);
+  EEPROM.get(100, dataPresent);
   if (dataPresent) {
-    EEPROM.get(1, Timezone);
-    EEPROM.get(3, UseDST);
-    EEPROM.get(5, CloseBeforeSunriseMinutes);
-    EEPROM.get(6, HourOpen);
-    EEPROM.get(7, MinuteOpen);
-    EEPROM.get(8, WeekendHourOpen);
-    EEPROM.get(9, WeekendMinuteOpen);
-    EEPROM.get(10, CalibrateUsingSensor);
-    EEPROM.get(11, UseLowerSensor);
-    EEPROM.get(12, UpMoveMillis);
-    EEPROM.get(16, DownMoveMillis);
-    EEPROM.get(20, CalibrationMoveMillis);
+    EEPROM.get(104, Timezone);
+    EEPROM.get(106, UseDST);
+    EEPROM.get(108, CloseBeforeSunriseMinutes);
+    EEPROM.get(110, HourOpen);
+    EEPROM.get(112, MinuteOpen);
+    EEPROM.get(114, WeekendHourOpen);
+    EEPROM.get(116, WeekendMinuteOpen);
+    EEPROM.get(118, CalibrateUsingSensor);
+    EEPROM.get(120, UseLowerSensor);
+    EEPROM.get(122, UpMoveMillis);
+    EEPROM.get(126, DownMoveMillis);
+    EEPROM.get(130, CalibrationMoveMillis);
+    EEPROM.get(134, TemperatureOffset);
+    EEPROM.get(138, ClosingTemperature);
+  }
+  else {
+    printLine("Using default configuration");
   }
 
   // For NTP
@@ -531,7 +537,7 @@ void handleWebClient() {
                       dataPresent = false;
                     } else if (param.indexOf("Timezone") == 0) {
                       temp = value.toInt();
-                      if (temp >= 0) Timezone = temp;
+                      if (temp >= 0 && temp <= 23) Timezone = temp;
                     } else if (param.indexOf("UseDST") == 0) {
                       UseDST = true;
                     } else if (param.indexOf("CloseBeforeSunriseMinutes") == 0) {
@@ -539,22 +545,20 @@ void handleWebClient() {
                       if (temp >= 0) CloseBeforeSunriseMinutes = temp;
                     } else if (param.indexOf("HourOpen") == 0) {
                       temp = value.toInt();
-                      if (temp >= 0) HourOpen = temp;
+                      if (temp >= 0 && temp <= 23) HourOpen = temp;
                     } else if (param.indexOf("MinuteOpen") == 0) {
                       temp = value.toInt();
-                      if (temp >= 0) MinuteOpen = temp;
+                      if (temp >= 0 && temp <= 59) MinuteOpen = temp;
                     } else if (param.indexOf("WeekendHourOpen") == 0) {
                       temp = value.toInt();
-                      if (temp >= 0) WeekendHourOpen = temp;
+                      if (temp >= 0 && temp <= 23) WeekendHourOpen = temp;
                     } else if (param.indexOf("WeekendMinuteOpen") == 0) {
                       temp = value.toInt();
-                      if (temp >= 0) WeekendMinuteOpen = temp;
+                      if (temp >= 0 && temp <= 59) WeekendMinuteOpen = temp;
                     } else if (param.indexOf("CalibrateUsingSensor") == 0) {
-                      temp = value.toInt();
-                      CalibrateUsingSensor = (temp == 1);
+                      CalibrateUsingSensor = true;
                     } else if (param.indexOf("UseLowerSensor") == 0) {
-                      temp = value.toInt();
-                      UseLowerSensor = (temp == 1);
+                      UseLowerSensor = true;
                     } else if (param.indexOf("UpMoveMillis") == 0) {
                       temp = value.toInt();
                       if (temp >= 0) UpMoveMillis = temp;
@@ -564,6 +568,10 @@ void handleWebClient() {
                     } else if (param.indexOf("CalibrationMoveMillis") == 0) {
                       temp = value.toInt();
                       if (temp >= 0) CalibrationMoveMillis = temp;
+                    } else if (param.indexOf("TemperatureOffset") == 0) {
+                      TemperatureOffset = value.toInt();
+                    } else if (param.indexOf("ClosingTemperature") == 0) {
+                      ClosingTemperature = value.toInt();
                     } else {
                       invalidParam = true;
                     }
@@ -587,19 +595,21 @@ void handleWebClient() {
                 } while (!invalidParam && end > begin + 1);
 
                 // Put new settings into EEPROM
-                EEPROM.put(0, dataPresent);
-                EEPROM.put(1, Timezone);
-                EEPROM.put(3, UseDST);
-                EEPROM.put(5, CloseBeforeSunriseMinutes);
-                EEPROM.put(6, HourOpen);
-                EEPROM.put(7, MinuteOpen);
-                EEPROM.put(8, WeekendHourOpen);
-                EEPROM.put(9, WeekendMinuteOpen);
-                EEPROM.put(10, CalibrateUsingSensor);
-                EEPROM.put(11, UseLowerSensor);
-                EEPROM.put(12, UpMoveMillis);
-                EEPROM.put(16, DownMoveMillis);
-                EEPROM.put(20, CalibrationMoveMillis);
+                EEPROM.put(100, dataPresent);
+                EEPROM.put(104, Timezone);
+                EEPROM.put(106, UseDST);
+                EEPROM.put(108, CloseBeforeSunriseMinutes);
+                EEPROM.put(110, HourOpen);
+                EEPROM.put(112, MinuteOpen);
+                EEPROM.put(114, WeekendHourOpen);
+                EEPROM.put(116, WeekendMinuteOpen);
+                EEPROM.put(118, CalibrateUsingSensor);
+                EEPROM.put(120, UseLowerSensor);
+                EEPROM.put(122, UpMoveMillis);
+                EEPROM.put(126, DownMoveMillis);
+                EEPROM.put(130, CalibrationMoveMillis);
+                EEPROM.put(134, TemperatureOffset);
+                EEPROM.put(138, ClosingTemperature);
 
                 // Write the data to EEPROM
                 bool ok = EEPROM.commit();
@@ -624,7 +634,7 @@ void handleWebClient() {
             client.println(".button2 {background-color: #77878A;}</style></head>");
 
             // Web Page Heading
-            client.println("<body><h1>ESP8266 Web Server</h1>");
+            client.println("<body><h1>Chicken Door</h1>");
             client.print("<p>Today date/time: ");
             sprintf(buf, "%2d-%02d-%4d %02d:%02d:%02d",
               day(t_now), month(t_now), year(t_now), hour(t_now), minute(t_now), second(t_now));
@@ -656,6 +666,7 @@ void handleWebClient() {
             client.println("</p>");
 
             if (Bme280Present) {
+              temperature = bme.readTemperature() + (TemperatureOffset / 10.0);
               client.print("<p>Current temperature, humidity and pressure: ");
               sprintf(buf, "%0.1f*C, ", temperature);
               client.print(buf);
@@ -728,12 +739,12 @@ void handleWebClient() {
             client.print("<p>WeekendMinuteOpen:<input type=\"text\" name=\"WeekendMinuteOpen\" value=\"");
             client.print(WeekendMinuteOpen);
             client.println("\"></p>");
-            client.print("<p>CalibrateUsingSensor:<input type=\"text\" name=\"CalibrateUsingSensor\" value=\"");
-            client.print(CalibrateUsingSensor);
-            client.println("\"></p>");
-            client.print("<p>UseLowerSensor:<input type=\"text\" name=\"UseLowerSensor\" value=\"");
-            client.print(UseLowerSensor);
-            client.println("\"></p>");
+            client.print("<p>CalibrateUsingSensor:<input type=\"checkbox\" name=\"CalibrateUsingSensor\"");
+            if (CalibrateUsingSensor) client.print(" checked");
+            client.println("></p>");
+            client.print("<p>UseLowerSensor:<input type=\"checkbox\" name=\"UseLowerSensor\"");
+            if (UseLowerSensor) client.print(" checked");
+            client.println("></p>");
             client.print("<p>UpMoveMillis:<input type=\"text\" name=\"UpMoveMillis\" value=\"");
             client.print(UpMoveMillis);
             client.println("\"></p>");
@@ -743,6 +754,12 @@ void handleWebClient() {
             client.print("<p>CalibrationMoveMillis:<input type=\"text\" name=\"CalibrationMoveMillis\" value=\"");
             client.print(CalibrationMoveMillis);
             client.println("\"></p>");
+            client.print("<p>TemperatureOffset:<input type=\"text\" name=\"TemperatureOffset\" value=\"");
+            client.print(TemperatureOffset);
+            client.println("\"> in 0.1 &#176;C (10 means 1 &#176;C)</p>");
+            client.print("<p>ClosingTemperature:<input type=\"text\" name=\"ClosingTemperature\" value=\"");
+            client.print(ClosingTemperature);
+            client.println("\"> in 0.1 &#176;C</p>");
             client.println("<p><input type=\"submit\" value=\"Submit\"></p>");
             client.println("</form>");
 
@@ -796,8 +813,8 @@ void setSunriseSunsetClosingTime() {
   printDateTime(sunSet);
   printLine("");
 
-  // The time for closing the door is <CloseBeforeSunriseMinutes> before sunset
-  // or opening time, whichever comes first.
+  // The time for closing the door is <CloseBeforeSunriseMinutes> before sunrise
+  // or before opening time, whichever comes first.
   tmElements_t openingTimeElements;
   if (dayOfWeek(now()) > 1 && dayOfWeek(now()) < 7) {
     openingTimeElements = { second(), MinuteOpen, HourOpen, weekday(), day(), month(), year() - 1970 };
@@ -807,7 +824,6 @@ void setSunriseSunsetClosingTime() {
   time_t openingTime = makeTime(openingTimeElements);
 
   if (openingTime < sunRise) {
-    printLine("The time for opening is before sunrise");
     closingTime = openingTime - (CloseBeforeSunriseMinutes * 60);
   } else {
     closingTime = sunRise - (CloseBeforeSunriseMinutes * 60);
@@ -984,7 +1000,7 @@ void loop() {
     bme.takeForcedMeasurement();
 
     // Temperature
-    temperature = bme.readTemperature() - 2;      // Correction for my BME280
+    temperature = bme.readTemperature() + (TemperatureOffset / 10.0);
     humidity = bme.readHumidity() - 9.0;          // Correction for my BME280
     pressure = bme.readPressure() / 100.0F;       // Correction for my BME280
     printf("Temperature: %0.1f*C, humidity: %0.f%%, pressure: %0.1f hPa\r\n", temperature, humidity, pressure);
@@ -1036,7 +1052,10 @@ void loop() {
       if (!stateChanged) {
         // In the night, when there is no interference from the sun on the IR sensor, the
         // position of the door is calibrated by moving it up until the sensor is triggered.
-        if (CalibrateUsingSensor && !calibrationFailed && !doorCalibrated && hour() == HourCalibration && minute() == MinuteCalibration) {
+        // Calibrate early when the temperature drops below the threshold.
+        if (CalibrateUsingSensor && !calibrationFailed && !doorCalibrated && 
+            ((hour() == HourCalibration && minute() == MinuteCalibration) ||
+             (UseTemperature && (temperature < (ClosingTemperature / 10.0)) && t_now > sunSet))) {
           if (upperSensorDetected) {
             // Calibrate by moving down a little bit so the sensor isn't triggered
             stateMachineState = ClearingSensor;
@@ -1048,8 +1067,12 @@ void loop() {
         }
 
         // Close the door if the temperature goes below the treshold and it is night OR
-        // when it is just before sunset and we want to keep the chicken inside a bit longer
-        if ((UseTemperature && (temperature < ClosingTemperature) && (t_now > sunSet || t_now < sunRise)) || (UseClock && (t_now >= closingTime) && (t_now < closingTime + 4)) || webCommand == DownCmd) {
+        // when it is just before sunset and we want to keep the chicken inside a bit longer.
+        // Note: at 2:30 the sunSet is recalculated, after that the door will no longer close
+        // when the temperature goed below the threshold.
+        if ((UseTemperature && (temperature < (ClosingTemperature / 10.0)) && t_now > sunSet && doorCalibrated) ||
+            (UseClock && (t_now >= closingTime) && (t_now < closingTime + 4)) ||
+            (webCommand == DownCmd)) {
           webCommand = NoCmd;
           stateMachineState = MovingDown;
         } else if (webCommand == Move1SecUpCmd || webCommand == Move1SecDownCmd) {
@@ -1163,7 +1186,10 @@ void loop() {
 
       // Transitions
       if (!stateChanged) {
-        if ((UseTemperature && ((temperature > ClosingTemperature) || (t_now > sunRise && t_now < sunSet))) || (UseClock && (dayOfWeek(now()) > 1) && (dayOfWeek(now()) < 7) && (hour() == HourOpen) && (minute() == MinuteOpen)) || (UseClock && (dayOfWeek(now()) == 1 || dayOfWeek(now()) == 7) && (hour() == WeekendHourOpen) && (minute() == WeekendMinuteOpen)) || (webCommand == UpCmd)) {
+        // Open the door at the configured time. Do not open it when temperature goes above ClosingTemperature to avoid jojoing.
+        if ((UseClock && (dayOfWeek(now()) > 1) && (dayOfWeek(now()) < 7) && (hour() == HourOpen) && (minute() == MinuteOpen)) ||
+            (UseClock && (dayOfWeek(now()) == 1 || dayOfWeek(now()) == 7) && (hour() == WeekendHourOpen) && (minute() == WeekendMinuteOpen)) || 
+            (webCommand == UpCmd)) {
           webCommand = NoCmd;
           stateMachineState = MovingUp;
         } else if (webCommand == Move1SecUpCmd || webCommand == Move1SecDownCmd) {
