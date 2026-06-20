@@ -28,22 +28,46 @@
 #include <Adafruit_BME280.h>
 #include <ESP_Mail_Client.h>
 #include <ESP_EEPROM.h>
+#include "Secrets.h"
+
+// ************************************************************************
+// Create file Secrets.h with the following contents. Replace with your
+// information where indicated.
+// ************************************************************************
+/*
+// Wifi connection
+const char* ssid = "REPLACE_WITH_YOUR_SSID";
+const char* password = "REPLACE_WITH_YOUR_PASSWORD";
+
+// Email
+const char* fromAddress = "REPLACE_WITH_EMAIL_ADDRESS";       // The email address you want messages to be sent from
+const char* toAddress = "REPLACE_WITH_EMAIL_ADDRESS";         // The email address you want messages sent to
+const char* smtpServer = "REPLACE_WITH_SERVER_URL";           // The server to use for sending email (e.g. smtp.gmail.com)
+const char* emailAccount = "REPLACE_WITH_EMAIL_ADDRESS";      // The email account on the server (e.g. myaddress@gmail.com)
+const char* emailPassword = "REPLACE_WITH_PASSWORD";          // The password for the email account (for Gmail an App Password)
+
+// Location
+const float Latitude = 0.0000000;                             // Replace with your coordinates
+const float Longitude = 0.000000;
+*/
+// ************************************************************************
+// End of Secrets.h
+// ************************************************************************
 
 // ************************************************************************
 // Change the constants below to adjust the software to your situation
 // ************************************************************************
-
 // GPIO
 const int L9110_A_IA = 12;                  // Motor A Input A --> MOTOR A +
 const int L9110_A_IB = 14;                  // Motor A Input B --> MOTOR A -
 const int UpperSensorPin = 13;              // Digital output of upper TCRT5000 Tracking Sensor Module
 const int LowerSensorPin = 16;              // Digital output of lower TCRT5000 Tracking Sensor Module
 
-// Regional settings
-const float Latitude = 0.0000000;           // Replace with your coordinates
-const float Longitude = 0.000000;
-int8_t Timezone = 60;                       // UTC difference in minutes (can be changed through web page)
-bool UseDST = true;                         // Indicates whether Daylight Saving Time is observed in your region or not.
+uint8_t Timezone = 60;                      // UTC difference in minutes (can be changed through web page)
+bool UseDST = true;                         // Is Daylight Saving Time observed in your region (can be changed through web page)
+// ************************************************************************
+// Change the constants above to adjust the software to your situation
+// ************************************************************************
 
 // Opening and closing times (can be changed through the web page)
 uint8_t CloseBeforeSunriseMinutes = 120;    // The number of minutes before sunrise we close the coop
@@ -54,23 +78,16 @@ uint8_t WeekendMinuteOpen = 20;
 uint8_t HourCalibration = 1;                // Hour when to calibrate the position of the door
 uint8_t MinuteCalibration = 0;              // Minute when to calibrate the position of the door
 
-// For the Wifi connection. Replace with your network credentials
-const char* ssid = "REPLACE_WITH_YOUR_SSID";
-const char* password = "REPLACE_WITH_YOUR_PASSWORD";
+// For the Wifi connection
+#define RETRY_PERIOD 30                     // Number of seconds before retrying wifi connection
 const time_t connectPeriod = 90;            // Max period (in s) for setting up a wifi connection
+uint8_t retryPeriod = RETRY_PERIOD;         // Number of seconds before retrying wifi connection
 
 // NTP stuff
-const char* NtpServer = "time.windows.com"; // A reliable NTP server ("time.nist.gov" didn't work so well)
+const char* NtpServer = "pool.ntp.org";     // A pool of NTP servers
 const unsigned int localPort = 2390;        // Local port to listen for UDP packets
 const int NtpPacketSize = 48;               // NTP time stamp is in the first 48 bytes of the message
 const time_t UpdateTimeTimeout = 300;       // Time (in seconds) we will try updating the clock
-
-// Email
-char* fromAddress = "REPLACE_WITH_YOUR_EMAIL";       // The address you want alarm messages sent from
-char* toAddress = "REPLACE_WITH_YOUR_EMAIL";    // The email address you want alarm messages sent to
-char* smtpServer = "REPLACE_WITH_YOUR_SERVER";     // The server to use for sending email
-char* emailAccount = "REPLACE_WITH_YOUR_ACCOUNT";              // The email account on the server
-char* emailPassword = "REPLACE_WITH_YOUR_PASSWORD"; // The password for the email account
 
 // The actual values for "fast" and "slow" depend on the motor
 const int PwmSlow = 750;                    // Slow speed PWM duty cycle
@@ -89,8 +106,8 @@ const bool UseClock = true;                 // Use the clock for deciding when t
 // For reading the temperature
 const time_t LoopPeriod = 180;              // Number of seconds between checks
 bool Bme280Present = true;                  // Initialize/use the BME280 or not
-int ClosingTemperature = 20;                // Close the door at night when the temperature goes below this value (in 0.1 °C)
-int TemperatureOffset = 0;                  // Add to measured temperature to get real temperature (in 0.1 °C)
+int ClosingTemperature = 20;                // Close the door at night when the temperature goes below this value (in 0.1 Â°C)
+int TemperatureOffset = 0;                  // Add to measured temperature to get real temperature (in 0.1 Â°C)
 
 // ************************************************************************
 // Change the constants above to adjust the software to your situation
@@ -136,13 +153,11 @@ bool clientActive = false;                  // A web client is active
 String currentLine = "";                    // A string to hold incoming data from the client
 time_t clientConnectedAt;
 const time_t webConnectPeriod = 30;         // Max timeout period (in s) for HTTP connections
-
-// Variable to store the HTTP request
-String header;
+String header;                              // Variable to store the HTTP request
 
 WiFiUDP Udp;                                // A UDP instance for sending and receiving packets over UDP
 byte packetBuffer[NtpPacketSize];           // Buffer to hold incoming and outgoing packets
-time_t updateTimeStarted;                   // The time when we started updating the clock
+time_t clockUpdateStarted;                  // The time when we started updating the clock
 bool ntpTimeSet = false;                    // Has the time been set through NTP?
 bool emailSent = false;                     // Has an email been sent because setting the time failed?
 int lastSecond = -1;                        // The second we last did stuff for NTP
@@ -188,6 +203,7 @@ float temperature;
 float humidity;                             // Informational
 float pressure;                             // Informational
 
+#define MAX_DEBUG_TEXT 16000
 String debugText = "";                      // A string to hold all debug text (max. 24000 chars it turns out)
 
 // The setup function that initializes everything
@@ -203,6 +219,52 @@ void setup() {
   // Sensors
   pinMode(UpperSensorPin, INPUT);
   pinMode(LowerSensorPin, INPUT);
+
+  // When using the temperature, initialize the BME280
+  if (Bme280Present) {
+    // Check for the BME280 sensor
+    printLine("Starting BME280 sensor");
+    if (bme.begin(0x76)) {
+      // Scenario for weather monitoring
+      printLine("Setting BME280 to weather station scenario:");
+      printLine("  Forced mode, 1x temperature / 1x humidity / 1x pressure oversampling, filter off");
+      bme.setSampling(Adafruit_BME280::MODE_FORCED,
+        Adafruit_BME280::SAMPLING_X1,  // Temperature
+        Adafruit_BME280::SAMPLING_X1,  // Pressure
+        Adafruit_BME280::SAMPLING_X1,  // Humidity
+        Adafruit_BME280::FILTER_OFF);
+    } else {
+      printLine("Could not find a valid BME280 sensor, please check wiring.");
+      Bme280Present = false;
+    }
+  }
+
+  // The begin() call is required to initialize the EEPROM library
+  EEPROM.begin(142);
+
+  // Read from EEPROM
+  bool dataPresent = false;
+  EEPROM.get(100, dataPresent);
+  if (dataPresent) {
+    EEPROM.get(104, Timezone);
+    EEPROM.get(106, UseDST);
+    EEPROM.get(108, CloseBeforeSunriseMinutes);
+    EEPROM.get(110, HourOpen);
+    EEPROM.get(112, MinuteOpen);
+    EEPROM.get(114, WeekendHourOpen);
+    EEPROM.get(116, WeekendMinuteOpen);
+    EEPROM.get(118, CalibrateUsingSensor);
+    EEPROM.get(120, UseLowerSensor);
+    EEPROM.get(122, UpMoveMillis);
+    EEPROM.get(126, DownMoveMillis);
+    EEPROM.get(130, CalibrationMoveMillis);
+    EEPROM.get(134, TemperatureOffset);
+    EEPROM.get(138, ClosingTemperature);
+    EEPROM.get(142, retryPeriod);
+  }
+  else {
+    printLine("Using default configuration");
+  }
 
   // Initialize Wi-Fi. Force the ESP to reset Wi-Fi and initialize correctly.
   Serial.print("WiFi status = ");
@@ -247,59 +309,23 @@ void setup() {
     WiFi.disconnect();
     Serial.println();
     Serial.println("No Wi-Fi connection established, rebooting");
-    delay(5000);
-    ESP.restart();
-  }
 
-  // When using the temperature, initialize the BME280
-  if (Bme280Present) {
-    // Check for the BME280 sensor
-    printLine("Starting BME280 sensor");
-    if (bme.begin(0x76)) {
-      // Scenario for weather monitoring
-      printLine("Setting BME280 to weather station scenario:");
-      printLine("  Forced mode, 1x temperature / 1x humidity / 1x pressure oversampling, filter off");
-      bme.setSampling(Adafruit_BME280::MODE_FORCED,
-        Adafruit_BME280::SAMPLING_X1,  // Temperature
-        Adafruit_BME280::SAMPLING_X1,  // Pressure
-        Adafruit_BME280::SAMPLING_X1,  // Humidity
-        Adafruit_BME280::FILTER_OFF);
-    } else {
-      printLine("Could not find a valid BME280 sensor, please check wiring.");
-      Bme280Present = false;
+    delay(retryPeriod * 1000);
+    if (retryPeriod < 600) {
+      retryPeriod = retryPeriod * 2;
+      EEPROM.put(142, retryPeriod);
+
+      // Write the data to EEPROM
+      bool ok = EEPROM.commit();
+      printLine((ok) ? "Commit OK" : "Commit failed");
     }
-  }
-
-  // The begin() call is required to initialize the EEPROM library
-  EEPROM.begin(142);
-
-  // Read from EEPROM
-  bool dataPresent = false;
-  EEPROM.get(100, dataPresent);
-  if (dataPresent) {
-    EEPROM.get(104, Timezone);
-    EEPROM.get(106, UseDST);
-    EEPROM.get(108, CloseBeforeSunriseMinutes);
-    EEPROM.get(110, HourOpen);
-    EEPROM.get(112, MinuteOpen);
-    EEPROM.get(114, WeekendHourOpen);
-    EEPROM.get(116, WeekendMinuteOpen);
-    EEPROM.get(118, CalibrateUsingSensor);
-    EEPROM.get(120, UseLowerSensor);
-    EEPROM.get(122, UpMoveMillis);
-    EEPROM.get(126, DownMoveMillis);
-    EEPROM.get(130, CalibrationMoveMillis);
-    EEPROM.get(134, TemperatureOffset);
-    EEPROM.get(138, ClosingTemperature);
-  }
-  else {
-    printLine("Using default configuration");
+    ESP.restart();
   }
 
   // For NTP
   Udp.begin(localPort);
   printLine("Started listening for UDP packets");
-  updateTimeStarted = now();
+  clockUpdateStarted = now();
 
   // Set the callback function to get email sending results
   smtp.callback(smtpCallback);
@@ -338,7 +364,7 @@ time_t getNtpTime() {
     Udp.read(packetBuffer, NtpPacketSize);  // Read the packet into the buffer
 
     // The timestamp starts at byte 40 of the received packet and is four bytes,
-    // or two words, long. First, esxtract the two words:
+    // or two words, long. First, extract the two words:
 
     unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
     unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
@@ -368,7 +394,7 @@ time_t getNtpTime() {
 // Daylight Saving Time starts at 2 a.m. on the last Sunday in March. The clock is then set 1 hour
 // ahead to 3 o'clock. So this Sunday lasts only 23 hours; an hour shorter than a normal day.
 // Winter time starts at 3 a.m. on the last Sunday in the month of October. The time is
-// then reset 1 hour to 2 hours. In practice this means that this day lasts 25 hours.
+// then set back 1 hour to 2 a.m. In practice this means that this day lasts 25 hours.
 // This function determines whether DST is active on the date specified by parameter 'time'.
 // Note that it does not look at the time to make this determination, so it returns true for the
 // last Sunday in March, regardless of the time, and false for the last Sunday in October.
@@ -391,16 +417,16 @@ bool dstActive(time_t time) {
 
 // Two functions to handle debug messages
 void printNoLine(String text) {
-  if (debugText.length() > 23800) {
-    debugText.remove(0, 1000);
+  if (debugText.length() > MAX_DEBUG_TEXT) {
+    debugText = debugText.substring(debugText.length() - MAX_DEBUG_TEXT / 2);
   }
   debugText += text;
   Serial.print(text);
 }
 
 void printLine(String text) {
-  if (debugText.length() > 23800) {
-    debugText.remove(0, 1000);
+  if (debugText.length() > MAX_DEBUG_TEXT) {
+    debugText = debugText.substring(debugText.length() - MAX_DEBUG_TEXT / 2);
   }
   debugText += text + "<br>\n";
   Serial.println(text);
@@ -610,6 +636,7 @@ void handleWebClient() {
                 EEPROM.put(130, CalibrationMoveMillis);
                 EEPROM.put(134, TemperatureOffset);
                 EEPROM.put(138, ClosingTemperature);
+                //EEPROM.get(142, retryPeriod);
 
                 // Write the data to EEPROM
                 bool ok = EEPROM.commit();
@@ -618,8 +645,6 @@ void handleWebClient() {
             }
 
             time_t t_now = now();
-            //printDateTime(t_now);
-            //printLine("");
 
             // Display the HTML web page
             client.println("<!DOCTYPE html><html>");
@@ -891,7 +916,7 @@ void loop() {
   if (!ntpTimeSet) {
     // If not set, check for the time, but only for a few minutes.
     // In order not to do these checks every loop, proceed only once a second
-    if ((now() < updateTimeStarted + UpdateTimeTimeout) && (lastSecond != second())) {
+    if ((now() < clockUpdateStarted + UpdateTimeTimeout) && (lastSecond != second())) {
       // Send a packet every 30 seconds and check for an answer the other times
       if (second() % 30 == 8) {
         printNoLine("Requesting time from NTP server at ");
@@ -938,10 +963,10 @@ void loop() {
         }
       }
       lastSecond = second();
-    } else if (now() > updateTimeStarted + 3600) {
+    } else if (now() > clockUpdateStarted + 3600) {
       // After an hour, try it again.
-      updateTimeStarted = now();
-    } else if (now() > updateTimeStarted + UpdateTimeTimeout) {
+      clockUpdateStarted = now();
+    } else if (now() > clockUpdateStarted + UpdateTimeTimeout) {
       // No time packet was received, send a warning email once.
       // Chances are the internet connection is down anyway.
       if (!emailSent) {
@@ -958,7 +983,7 @@ void loop() {
       printDateTime(now());
       printLine("");
       ntpTimeSet = false;
-      updateTimeStarted = now();
+      clockUpdateStarted = now();
       emailSent = false;
     }
   }
