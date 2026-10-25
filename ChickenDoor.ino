@@ -204,11 +204,14 @@ float humidity;                             // Informational
 float pressure;                             // Informational
 
 #define MAX_DEBUG_TEXT 16000
-String debugText = "";                      // A string to hold all debug text (max. 24000 chars it turns out)
+String debugText = "";                      // A string to hold all debug text (reserved in setup())
 
 // The setup function that initializes everything
 void setup() {
   Serial.begin(115200);
+
+  // Reserve the memory for the debug log while the heap is not yet fragmented
+  debugText.reserve(MAX_DEBUG_TEXT);
 
   // Initialize motor
   pinMode(L9110_A_IB, OUTPUT);
@@ -391,44 +394,45 @@ time_t getNtpTime() {
   return result;
 }
 
-// Daylight Saving Time starts at 2 a.m. on the last Sunday in March. The clock is then set 1 hour
-// ahead to 3 o'clock. So this Sunday lasts only 23 hours; an hour shorter than a normal day.
-// Winter time starts at 3 a.m. on the last Sunday in the month of October. The time is
-// then set back 1 hour to 2 a.m. In practice this means that this day lasts 25 hours.
-// This function determines whether DST is active on the date specified by parameter 'time'.
-// Note that it does not look at the time to make this determination, so it returns true for the
-// last Sunday in March, regardless of the time, and false for the last Sunday in October.
+// In the EU, Daylight Saving Time starts at 1 a.m. UTC on the last Sunday in March and ends at
+// 1 a.m. UTC on the last Sunday in October. In the Netherlands that is 2 a.m. local time in
+// March (the clock moves ahead to 3 o'clock) and 3 a.m. local time in October (the clock moves
+// back to 2 o'clock).
+// This function determines whether DST is active at the moment specified by parameter 'utc',
+// which must be UTC time, not local time.
 // Note: dayOfWeek(SUN) = 1, dayOfWeek(MON) = 2, etc.
-bool dstActive(time_t time) {
-  bool result = false;
-  int dayParam = day(time);
-  int monthParam = month(time);
-  int dayOfWeekParam = dayOfWeek(time);
+bool dstActive(time_t utc) {
+  int monthParam = month(utc);
+  if (monthParam < 3 || monthParam > 10) return false;
+  if (monthParam > 3 && monthParam < 10) return true;
 
-  // Check if today is a DST day
-  if ((monthParam == 3 && dayParam >= 25 && dayOfWeekParam <= dayParam - 24) ||
-      (monthParam == 10 && (dayParam < 25 || (dayParam >= 25 && dayParam - dayOfWeekParam <= 23))) ||
-      (monthParam > 3 && monthParam < 10)) {
-    result = true;
+  // March and October both have 31 days. Find the day of the month of the last Sunday.
+  int dayParam = day(utc);
+  int lastSunday = 31 - ((dayOfWeek(utc) - 1 + 31 - dayParam) % 7);
+  bool afterSwitch = (dayParam > lastSunday) || (dayParam == lastSunday && hour(utc) >= 1);
+
+  // DST starts at the switch in March and ends at the switch in October
+  return (monthParam == 3) ? afterSwitch : !afterSwitch;
+}
+
+// Add text to the debug log. The memory for the log is reserved once in setup() and old text is
+// removed in place, so the log never needs new memory. Growing a large String fails silently
+// when the heap is fragmented, which made the log stop.
+void addDebugText(const String& text) {
+  if (debugText.length() + text.length() > MAX_DEBUG_TEXT) {
+    debugText.remove(0, debugText.length() - MAX_DEBUG_TEXT / 2);
   }
-
-  return result;
+  debugText += text;
 }
 
 // Two functions to handle debug messages
 void printNoLine(String text) {
-  if (debugText.length() > MAX_DEBUG_TEXT) {
-    debugText = debugText.substring(debugText.length() - MAX_DEBUG_TEXT / 2);
-  }
-  debugText += text;
+  addDebugText(text);
   Serial.print(text);
 }
 
 void printLine(String text) {
-  if (debugText.length() > MAX_DEBUG_TEXT) {
-    debugText = debugText.substring(debugText.length() - MAX_DEBUG_TEXT / 2);
-  }
-  debugText += text + "<br>\n";
+  addDebugText(text + "<br>\n");
   Serial.println(text);
 }
 
@@ -515,14 +519,8 @@ void handleWebClient() {
           // If the current line is blank, you got two newline characters in a row.
           // That's the end of the client HTTP request, so send a response
           if (currentLine.length() == 0) {
-            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-            // and a content-type so the client knows what's coming, then a blank line
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println("Connection: close");
-            client.println();
-
             // Handle user input
+            bool redirect = true;                 // Commands are answered with a redirect to the main page
             if (header.indexOf("GET /up1sec") >= 0) {
               printLine("Up for 1 second selected");
               webCommand = Move1SecUpCmd;
@@ -642,7 +640,33 @@ void handleWebClient() {
                 bool ok = EEPROM.commit();
                 printLine((ok) ? "Commit OK" : "Commit failed");
               }
+            } else {
+              redirect = false;
             }
+
+            if (redirect) {
+              // Send the browser back to the main page, so the address bar no longer holds the
+              // command. Otherwise reloading or reopening the page would execute it again.
+              client.println("HTTP/1.1 303 See Other");
+              client.println("Location: /");
+              client.println("Connection: close");
+              client.println();
+
+              header = "";
+              client.stop();
+              printLine("Client redirected to main page");
+              printLine("");
+
+              clientActive = false;
+              return;
+            }
+
+            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
+            // and a content-type so the client knows what's coming, then a blank line
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-type:text/html");
+            client.println("Connection: close");
+            client.println();
 
             time_t t_now = now();
 
@@ -740,6 +764,12 @@ void handleWebClient() {
             }
             client.println("<p><a href=\"/\"><button class=\"button\">Refresh</button></a></p><br>");
 
+            client.print("<p>Free heap: ");
+            client.print(ESP.getFreeHeap());
+            client.print(" bytes, largest free block: ");
+            client.print(ESP.getMaxFreeBlockSize());
+            client.println(" bytes</p>");
+
             // Print the form for uploading settings
             client.println("<form action=\"/params\">");
             client.println("<p>Revert to default values after reset:<input type=\"checkbox\" name=\"Revert\"></p>");
@@ -815,11 +845,16 @@ void handleWebClient() {
       } else {
         // The client is connected but no data is available. Time out if this takes too long.
         if (now() > clientConnectedAt + webConnectPeriod) {
+          // Discard the partial request, so it doesn't use memory or end up in the next request
+          header = "";
+          client.stop();
           clientActive = false;
           printLine("Client connection timed out");
         }
       }
     } else {
+      header = "";
+      client.stop();
       clientActive = false;
       printLine("Client no longer connected");
     }
@@ -977,8 +1012,9 @@ void loop() {
   } else {
     // Make sure the clock is updated once a week on Sunday mornings.
     // This also allows for DST to be set correctly. Note that time can move
-    // back or forward by one hour.
-    if (dayOfWeek(now()) == 1 && hour() == 1 && minute() == 10 && second() == 0) {
+    // back or forward by one hour. This must happen after the switch to or from
+    // DST (2 a.m. winter time, 3 a.m. summer time), so we do it at 3:30.
+    if (dayOfWeek(now()) == 1 && hour() == 3 && minute() == 30 && second() == 0) {
       printNoLine("Invalidating time at ");
       printDateTime(now());
       printLine("");
