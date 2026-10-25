@@ -57,31 +57,34 @@ const float Longitude = 0.000000;
 // ************************************************************************
 // Change the constants below to adjust the software to your situation
 // ************************************************************************
+
 // GPIO
 const int L9110_A_IA = 12;                  // Motor A Input A --> MOTOR A +
 const int L9110_A_IB = 14;                  // Motor A Input B --> MOTOR A -
 const int UpperSensorPin = 13;              // Digital output of upper TCRT5000 Tracking Sensor Module
 const int LowerSensorPin = 16;              // Digital output of lower TCRT5000 Tracking Sensor Module
 
-uint8_t Timezone = 60;                      // UTC difference in minutes (can be changed through web page)
+// Regional settings. Adjust these to match your location
+int Timezone = 60;                          // UTC difference in minutes (can be changed through web page)
 bool UseDST = true;                         // Is Daylight Saving Time observed in your region (can be changed through web page)
+
 // ************************************************************************
 // Change the constants above to adjust the software to your situation
 // ************************************************************************
 
 // Opening and closing times (can be changed through the web page)
-uint8_t CloseBeforeSunriseMinutes = 120;    // The number of minutes before sunrise we close the coop
 uint8_t HourOpen = 7;                       // The time the chickens may leave the coop
 uint8_t MinuteOpen = 15;
 uint8_t WeekendHourOpen = 7;                // The time the chickens may leave the coop in the weekend
 uint8_t WeekendMinuteOpen = 20;
 uint8_t HourCalibration = 1;                // Hour when to calibrate the position of the door
 uint8_t MinuteCalibration = 0;              // Minute when to calibrate the position of the door
+uint8_t CloseBeforeSunriseMinutes = 120;    // The number of minutes before sunrise we close the coop
 
 // For the Wifi connection
 #define RETRY_PERIOD 30                     // Number of seconds before retrying wifi connection
 const time_t connectPeriod = 90;            // Max period (in s) for setting up a wifi connection
-uint8_t retryPeriod = RETRY_PERIOD;         // Number of seconds before retrying wifi connection
+uint16_t retryPeriod = RETRY_PERIOD;        // Number of seconds before retrying wifi connection
 
 // NTP stuff
 const char* NtpServer = "pool.ntp.org";     // A pool of NTP servers
@@ -104,10 +107,10 @@ const bool UseTemperature = true;           // Use the temperature for deciding 
 const bool UseClock = true;                 // Use the clock for deciding when to open and close the door (otherwise it's temperature based)
 
 // For reading the temperature
-const time_t LoopPeriod = 180;              // Number of seconds between checks
 bool Bme280Present = true;                  // Initialize/use the BME280 or not
+uint16_t TemperatureOffset = 0;             // Add to measured temperature to get real temperature (in 0.1 °C)
 int ClosingTemperature = 20;                // Close the door at night when the temperature goes below this value (in 0.1 °C)
-int TemperatureOffset = 0;                  // Add to measured temperature to get real temperature (in 0.1 °C)
+const time_t TempCheckPeriod = 180;         // Number of seconds between checks
 
 // ************************************************************************
 // Change the constants above to adjust the software to your situation
@@ -183,10 +186,10 @@ enum StateMachineState stateMachineState = NotRunning;
 enum StateMachineState previousStateMachineState = NotRunning;
 enum StateMachineState prevState = NotRunning;  // Used for returning to the previous state when moving 1 second
 bool stateChanged = true;                       // Start with entry code
-Command webCommand = NoCmd; // Command given through the web interface
+Command webCommand = NoCmd;                     // Command given through the web interface
 
-bool CalibrateUsingSensor = true;           // Calibrate the door position using a sensor at the top position of the door
-bool UseLowerSensor = false;                // Use a sensor to detect when the door is closed
+bool CalibrateUsingSensor = true;               // Calibrate the door position using a sensor at the top position of the door
+bool UseLowerSensor = false;                    // Use a sensor to detect when the door is closed
 
 bool lowerSensorDetected = false;
 bool upperSensorDetected = false;
@@ -243,7 +246,7 @@ void setup() {
   }
 
   // The begin() call is required to initialize the EEPROM library
-  EEPROM.begin(142);
+  EEPROM.begin(144);
 
   // Read from EEPROM
   bool dataPresent = false;
@@ -809,12 +812,14 @@ void handleWebClient() {
             client.print("<p>CalibrationMoveMillis:<input type=\"text\" name=\"CalibrationMoveMillis\" value=\"");
             client.print(CalibrationMoveMillis);
             client.println("\"></p>");
-            client.print("<p>TemperatureOffset:<input type=\"text\" name=\"TemperatureOffset\" value=\"");
-            client.print(TemperatureOffset);
-            client.println("\"> in 0.1 &#176;C (10 means 1 &#176;C)</p>");
-            client.print("<p>ClosingTemperature:<input type=\"text\" name=\"ClosingTemperature\" value=\"");
-            client.print(ClosingTemperature);
-            client.println("\"> in 0.1 &#176;C</p>");
+            if (Bme280Present) {
+              client.print("<p>TemperatureOffset:<input type=\"text\" name=\"TemperatureOffset\" value=\"");
+              client.print(TemperatureOffset);
+              client.println("\"> in 0.1 &#176;C (10 means 1 &#176;C)</p>");
+              client.print("<p>ClosingTemperature:<input type=\"text\" name=\"ClosingTemperature\" value=\"");
+              client.print(ClosingTemperature);
+              client.println("\"> in 0.1 &#176;C</p>");
+            }
             client.println("<p><input type=\"submit\" value=\"Submit\"></p>");
             client.println("</form>");
 
@@ -1048,8 +1053,8 @@ void loop() {
     detectSensors();
   }
 
-  // Update the temperature every LoopPeriod seconds
-  if (Bme280Present && (t_now >= previousCheckAt + LoopPeriod)) {
+  // Update the temperature every TempCheckPeriod seconds
+  if (Bme280Present && (t_now >= previousCheckAt + TempCheckPeriod)) {
     previousCheckAt = t_now;
 
     // Print timer interrupt count and time
