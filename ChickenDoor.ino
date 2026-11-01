@@ -65,7 +65,7 @@ const int UpperSensorPin = 13;              // Digital output of upper TCRT5000 
 const int LowerSensorPin = 16;              // Digital output of lower TCRT5000 Tracking Sensor Module
 
 // Regional settings. Adjust these to match your location
-int Timezone = 60;                          // UTC difference in minutes (can be changed through web page)
+int16_t Timezone = 60;                      // UTC difference in minutes (can be changed through web page)
 bool UseDST = true;                         // Is Daylight Saving Time observed in your region (can be changed through web page)
 
 // ************************************************************************
@@ -79,7 +79,7 @@ uint8_t WeekendHourOpen = 7;                // The time the chickens may leave t
 uint8_t WeekendMinuteOpen = 20;
 uint8_t HourCalibration = 1;                // Hour when to calibrate the position of the door
 uint8_t MinuteCalibration = 0;              // Minute when to calibrate the position of the door
-uint8_t CloseBeforeSunriseMinutes = 120;    // The number of minutes before sunrise we close the coop
+uint16_t CloseBeforeSunriseMinutes = 120;   // The number of minutes before sunrise we close the coop
 
 // For the Wifi connection
 #define RETRY_PERIOD 30                     // Number of seconds before retrying wifi connection
@@ -91,6 +91,9 @@ const char* NtpServer = "pool.ntp.org";     // A pool of NTP servers
 const unsigned int localPort = 2390;        // Local port to listen for UDP packets
 const int NtpPacketSize = 48;               // NTP time stamp is in the first 48 bytes of the message
 const time_t UpdateTimeTimeout = 300;       // Time (in seconds) we will try updating the clock
+int clockUpdateDay = 0;                     // The day of the month of the last weekly clock update
+int sunCalculationDay = 0;                  // The day of the month sunrise, sunset and closing time were last calculated
+int clockClosingDay = 0;                    // The day of the month the door was last closed at the closing time
 
 // The actual values for "fast" and "slow" depend on the motor
 const int PwmSlow = 750;                    // Slow speed PWM duty cycle
@@ -98,9 +101,9 @@ const int PwmFast = 1023;                   // Fast speed PWM duty cycle
 const int DirDelay = 1000;                  // Delay to prevent abrupt motor changes
 
 // Stuff related to controlling the motor
-long UpMoveMillis = 13300;                  // The default duration of an up move.
-long DownMoveMillis = 12700;                // The default duration of a down move. When using a lower sensor this is used when the sensor fails
-long CalibrationMoveMillis = 2500;          // The max. duration of the move used for calibrating the position of the door
+unsigned long UpMoveMillis = 13300;         // The default duration of an up move.
+unsigned long DownMoveMillis = 12700;       // The default duration of a down move. When using a lower sensor this is used when the sensor fails
+unsigned long CalibrationMoveMillis = 2500; // The max. duration of the move used for calibrating the position of the door
 
 // At least one of the following booleans must be true
 const bool UseTemperature = true;           // Use the temperature for deciding when to open and close the door (otherwise it's time based)
@@ -162,9 +165,9 @@ WiFiUDP Udp;                                // A UDP instance for sending and re
 byte packetBuffer[NtpPacketSize];           // Buffer to hold incoming and outgoing packets
 time_t clockUpdateStarted;                  // The time when we started updating the clock
 bool ntpTimeSet = false;                    // Has the time been set through NTP?
+bool ntpTimeInitialized = false;            // Has the time been set at least once through NTP?
 bool emailSent = false;                     // Has an email been sent because setting the time failed?
 int lastSecond = -1;                        // The second we last did stuff for NTP
-bool settingSunRiseSunSet = false;          // True when setting the sunrise and sunset
 
 // The SMTP session object used for email sending
 SMTPSession smtp;
@@ -311,6 +314,14 @@ void setup() {
     Serial.print("Signal strength (RSSI): ");
     Serial.print(rssi);
     Serial.println(" dBm");
+
+    // Connected again, so the next failure starts with the short wait
+    if (retryPeriod != RETRY_PERIOD) {
+      retryPeriod = RETRY_PERIOD;
+      EEPROM.put(142, retryPeriod);
+      bool ok = EEPROM.commit();
+      printLine((ok) ? "Commit OK" : "Commit failed");
+    }
   } else {
     WiFi.disconnect();
     Serial.println();
@@ -362,8 +373,8 @@ int sendNtpPacket(const char* host) {
 time_t getNtpTime() {
   time_t result = 0;
 
-  // Check if a reply is available
-  if (Udp.parsePacket()) {
+  // Check if a reply is available. A shorter packet isn't a valid reply.
+  if (Udp.parsePacket() >= NtpPacketSize) {
     printLine("Packet received");
 
     // We've received a packet, read the data from it
@@ -383,6 +394,12 @@ time_t getNtpTime() {
 
     // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
     const unsigned long seventyYears = 2208988800UL;
+
+    // A server that isn't synchronized sends 0. Ignore that and wait for the next reply.
+    if (secsSince1900 <= seventyYears) {
+      printLine("Invalid time received");
+      return 0;
+    }
 
     // Subtract seventy years:
     unsigned long epoch = secsSince1900 - seventyYears;
@@ -428,14 +445,22 @@ void addDebugText(const String& text) {
   debugText += text;
 }
 
+// The log is shown in the web page. Text from the mail server must not be read as HTML there.
+String htmlEscape(String text) {
+  text.replace("&", "&amp;");
+  text.replace("<", "&lt;");
+  text.replace(">", "&gt;");
+  return text;
+}
+
 // Two functions to handle debug messages
 void printNoLine(String text) {
-  addDebugText(text);
+  addDebugText(htmlEscape(text));
   Serial.print(text);
 }
 
 void printLine(String text) {
-  addDebugText(text + "<br>\n");
+  addDebugText(htmlEscape(text) + "<br>\n");
   Serial.println(text);
 }
 
@@ -499,6 +524,35 @@ bool detectSensors() {
   return true;
 }
 
+// Only accept a command in a state that handles it. Otherwise it would stay waiting and be
+// carried out later, e.g. a Stop from an outdated page would stop the next move at once.
+void setWebCommand(Command command) {
+  bool accepted = false;
+  switch (command) {
+    case UpCmd:
+      accepted = (stateMachineState == Down);
+      break;
+    case DownCmd:
+      accepted = (stateMachineState == Up);
+      break;
+    case StopCmd:
+      accepted = (stateMachineState == MovingUp || stateMachineState == MovingDown);
+      break;
+    case Move1SecUpCmd:
+    case Move1SecDownCmd:
+      accepted = (stateMachineState == Up || stateMachineState == Down);
+      break;
+    default:
+      break;
+  }
+
+  if (accepted) {
+    webCommand = command;
+  } else {
+    printLine("Command ignored, it doesn't fit the current state");
+  }
+}
+
 void handleWebClient() {
   char buf[20];
 
@@ -526,19 +580,19 @@ void handleWebClient() {
             bool redirect = true;                 // Commands are answered with a redirect to the main page
             if (header.indexOf("GET /up1sec") >= 0) {
               printLine("Up for 1 second selected");
-              webCommand = Move1SecUpCmd;
+              setWebCommand(Move1SecUpCmd);
             } else if (header.indexOf("GET /down1sec") >= 0) {
               printLine("Down for 1 second selected");
-              webCommand = Move1SecDownCmd;
+              setWebCommand(Move1SecDownCmd);
             } else if (header.indexOf("GET /down") >= 0) {
               printLine("Down selected");
-              webCommand = DownCmd;
+              setWebCommand(DownCmd);
             } else if (header.indexOf("GET /up") >= 0) {
               printLine("Up selected");
-              webCommand = UpCmd;
+              setWebCommand(UpCmd);
             } else if (header.indexOf("GET /stop") >= 0) {
               printLine("Stop selected");
-              webCommand = StopCmd;
+              setWebCommand(StopCmd);
             } else if (header.indexOf("GET /params") >= 0) {
               // Find first parameter
               int begin = header.indexOf('?');
@@ -550,7 +604,10 @@ void handleWebClient() {
                 bool dataPresent = true;
                 bool invalidParam = false;
 
+                // An unchecked checkbox isn't sent, so the checkboxes are off unless they're in the request
                 UseDST = false;
+                CalibrateUsingSensor = false;
+                UseLowerSensor = false;
 
                 do {
                   int equalsPos = sub.indexOf('=');
@@ -564,7 +621,7 @@ void handleWebClient() {
                       dataPresent = false;
                     } else if (param.indexOf("Timezone") == 0) {
                       temp = value.toInt();
-                      if (temp >= 0 && temp <= 23) Timezone = temp;
+                      if (temp >= -720 && temp <= 720) Timezone = temp;    // In minutes, the range sunMoon accepts
                     } else if (param.indexOf("UseDST") == 0) {
                       UseDST = true;
                     } else if (param.indexOf("CloseBeforeSunriseMinutes") == 0) {
@@ -677,6 +734,11 @@ void handleWebClient() {
             client.println("<!DOCTYPE html><html>");
             client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
             client.println("<link rel=\"icon\" href=\"data:,\">");
+            if (stateMachineState == Moving1Sec || stateMachineState == MovingUp || stateMachineState == MovingDown) {
+              // The command was answered before the move ended. Reload the page every second until
+              // the door has stopped, so the buttons for the next command appear by themselves.
+              client.println("<meta http-equiv=\"refresh\" content=\"1\">");
+            }
 
             // CSS to style the on/off buttons
             // Feel free to change the background-color and font-size attributes to fit your preferences
@@ -868,6 +930,8 @@ void handleWebClient() {
 
 // Calculate the next sunrise and sunset and time for closing the door
 void setSunriseSunsetClosingTime() {
+  sunCalculationDay = day();
+
   // Initialize sunMoon
   sm.init(Timezone, Latitude, Longitude);
   sunRise = sm.sunRise() + DST * 60;
@@ -881,10 +945,14 @@ void setSunriseSunsetClosingTime() {
   // The time for closing the door is <CloseBeforeSunriseMinutes> before sunrise
   // or before opening time, whichever comes first.
   tmElements_t openingTimeElements;
+  breakTime(now(), openingTimeElements);
+  openingTimeElements.Second = 0;
   if (dayOfWeek(now()) > 1 && dayOfWeek(now()) < 7) {
-    openingTimeElements = { second(), MinuteOpen, HourOpen, weekday(), day(), month(), year() - 1970 };
+    openingTimeElements.Minute = MinuteOpen;
+    openingTimeElements.Hour = HourOpen;
   } else {
-    openingTimeElements = { second(), WeekendMinuteOpen, WeekendHourOpen, weekday(), day(), month(), year() - 1970 };
+    openingTimeElements.Minute = WeekendMinuteOpen;
+    openingTimeElements.Hour = WeekendHourOpen;
   }
   time_t openingTime = makeTime(openingTimeElements);
 
@@ -991,6 +1059,7 @@ void loop() {
           printLine(" minutes");
           setTime(epoch + (Timezone + DST) * 60);
           ntpTimeSet = true;
+          ntpTimeInitialized = true;
 
           setSunriseSunsetClosingTime();
 
@@ -1019,7 +1088,10 @@ void loop() {
     // This also allows for DST to be set correctly. Note that time can move
     // back or forward by one hour. This must happen after the switch to or from
     // DST (2 a.m. winter time, 3 a.m. summer time), so we do it at 3:30.
-    if (dayOfWeek(now()) == 1 && hour() == 3 && minute() == 30 && second() == 0) {
+    // Any time after 3:30 will do, so the update isn't missed when the loop is busy at 3:30.
+    // The day is remembered, so it's done only once when the clock moves back to 2:30.
+    if (dayOfWeek(now()) == 1 && (hour() > 3 || (hour() == 3 && minute() >= 30)) && clockUpdateDay != day()) {
+      clockUpdateDay = day();
       printNoLine("Invalidating time at ");
       printDateTime(now());
       printLine("");
@@ -1031,16 +1103,15 @@ void loop() {
 
   time_t t_now = now();  // The number of seconds since Jan 1 1970
 
-  // Every day at two thirty a.m. calculate the next sunrise and sunset and the time for closing the door
-  if (!settingSunRiseSunSet && hour() == 2 && minute() == 30 && second() == 0) {
-    settingSunRiseSunSet = true;
+  // Every day at two thirty a.m. calculate the next sunrise and sunset and the time for closing the door.
+  // Any time after 2:30 will do, so the calculation isn't missed when the loop is busy at 2:30.
+  // It needs a clock that was set at least once, but not a successful weekly update.
+  if (ntpTimeInitialized && sunCalculationDay != day() && (hour() > 2 || (hour() == 2 && minute() >= 30))) {
     printNoLine("Calculating sunrise and sunset at ");
     printDateTime(t_now);
     printLine("");
 
     setSunriseSunsetClosingTime();
-  } else if (settingSunRiseSunSet && second() != 0) {
-    settingSunRiseSunSet = false;
   }
 
   // Web server stuff. Only run in stable state, because the state can be changed by the user.
@@ -1077,6 +1148,12 @@ void loop() {
   //******************************************************************
 
   switch (stateMachineState) {
+    //==============================================================
+    // State 'NotRunning': waiting until the clock is set
+    //==============================================================
+    case NotRunning:
+      break;
+
     //==============================================================
     // State 'Initial'
     //==============================================================
@@ -1116,12 +1193,21 @@ void loop() {
 
       // Transitions
       if (!stateChanged) {
+        // Is it night and has the temperature gone below the threshold? Only with a working BME280.
+        // Note: at 2:30 the sunSet is recalculated, after that the door will no longer close
+        // when the temperature goes below the threshold.
+        bool coldNight = UseTemperature && Bme280Present && (temperature < (ClosingTemperature / 10.0)) && t_now > sunSet;
+
+        // Close the door at the closing time, once a day. Some time after it still counts, so it isn't
+        // missed when the loop is busy, but not so long that a restart during the day closes the door.
+        bool closingTimeReached = UseClock && (t_now >= closingTime) && (t_now < closingTime + 600) && clockClosingDay != day();
+
         // In the night, when there is no interference from the sun on the IR sensor, the
         // position of the door is calibrated by moving it up until the sensor is triggered.
-        // Calibrate early when the temperature drops below the threshold.
-        if (CalibrateUsingSensor && !calibrationFailed && !doorCalibrated && 
-            ((hour() == HourCalibration && minute() == MinuteCalibration) ||
-             (UseTemperature && (temperature < (ClosingTemperature / 10.0)) && t_now > sunSet))) {
+        // Calibrate early when the temperature drops below the threshold. The door closes
+        // after the calibration, when it is back in this state.
+        if (CalibrateUsingSensor && !calibrationFailed && !doorCalibrated &&
+            ((hour() == HourCalibration && minute() == MinuteCalibration) || coldNight)) {
           if (upperSensorDetected) {
             // Calibrate by moving down a little bit so the sensor isn't triggered
             stateMachineState = ClearingSensor;
@@ -1130,15 +1216,12 @@ void loop() {
             stateMachineState = MovingIntoSensor;
           }
           doorCalibrated = true;
-        }
-
-        // Close the door if the temperature goes below the treshold and it is night OR
-        // when it is just before sunset and we want to keep the chicken inside a bit longer.
-        // Note: at 2:30 the sunSet is recalculated, after that the door will no longer close
-        // when the temperature goed below the threshold.
-        if ((UseTemperature && (temperature < (ClosingTemperature / 10.0)) && t_now > sunSet && doorCalibrated) ||
-            (UseClock && (t_now >= closingTime) && (t_now < closingTime + 4)) ||
-            (webCommand == DownCmd)) {
+        } else if (coldNight || closingTimeReached || (webCommand == DownCmd)) {
+          // Close the door if the temperature goes below the treshold and it is night OR
+          // when it is just before sunrise and we want to keep the chicken inside a bit longer.
+          if (closingTimeReached) {
+            clockClosingDay = day();
+          }
           webCommand = NoCmd;
           stateMachineState = MovingDown;
         } else if (webCommand == Move1SecUpCmd || webCommand == Move1SecDownCmd) {
