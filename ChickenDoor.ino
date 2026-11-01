@@ -108,7 +108,7 @@ const bool UseClock = true;                 // Use the clock for deciding when t
 
 // For reading the temperature
 bool Bme280Present = true;                  // Initialize/use the BME280 or not
-uint16_t TemperatureOffset = 0;             // Add to measured temperature to get real temperature (in 0.1 °C)
+int16_t TemperatureOffset = 0;              // Add to measured temperature to get real temperature (in 0.1 °C)
 int ClosingTemperature = 20;                // Close the door at night when the temperature goes below this value (in 0.1 °C)
 const time_t TempCheckPeriod = 180;         // Number of seconds between checks
 
